@@ -22,15 +22,21 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
-      - name: Fast scan (alive + latency, 4 regions x 2 ports)
-        run: python src/scanner.py
+      - name: Fast scan
+        run: |
+          set +e
+          python -u src/scanner.py 2>&1 | tee scan.log
+          ec=$?
+          if [ $ec -ne 0 ]; then echo "SCAN FAILED ec=$ec, last 40 lines:"; tail -40 scan.log; fi
+          exit $ec
       - name: Commit + push if changed
+        if: always() && !cancelled()
         run: |
           git config user.name "cf-pool-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data/scan.json
+          git add data/scan.json 2>/dev/null
           if git diff --quiet --staged; then
-            echo "scan unchanged, skip commit"
+            echo "scan unchanged, skip"
           else
             git commit -m "scan $(date -u +%FT%TZ)"
             git push
@@ -44,15 +50,21 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
-      - name: Deep refine (L1+L2+L3+L4 on runner egress)
-        run: python src/refine.py --l4
+      - name: Deep refine
+        run: |
+          set +e
+          python -u src/refine.py --l4 2>&1 | tee refine.log
+          ec=$?
+          if [ $ec -ne 0 ]; then echo "REFINE FAILED ec=$ec, last 40 lines:"; tail -40 refine.log; fi
+          exit $ec
       - name: Commit + push if changed
+        if: always() && !cancelled()
         run: |
           git config user.name "cf-pool-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data/refined.json
+          git add data/refined.json 2>/dev/null
           if git diff --quiet --staged; then
-            echo "refine unchanged, skip commit"
+            echo "refine unchanged, skip"
           else
             git commit -m "refine $(date -u +%FT%TZ)"
             git push
