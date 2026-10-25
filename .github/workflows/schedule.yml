@@ -1,0 +1,56 @@
+name: cf-region-exit-pool
+
+on:
+  schedule:
+    # fast scan every 15 min: pull source, probe alive+latency (L1 quick)
+    - cron: "*/15 * * * *"
+    # deep refine every 6h: L1+L2+L3+L4 (runner egress) -> polished pool
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      deep:
+        description: "run full 4-layer refine (L4 speed test on runner)"
+        type: choice
+        required: false
+        default: "fast"
+        options: ["fast", "deep"]
+
+jobs:
+  fast:
+    if: github.event_name != 'workflow_dispatch' || inputs.deep == 'fast'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Fast scan (alive + latency, 4 regions x 2 ports)
+        run: python src/scanner.py
+      - name: Commit fast scan result
+        run: |
+          git config user.name "cf-pool-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/scan.json
+          git diff --quiet --staged data/scan.json && echo "no change" || git commit -m "scan: $(date -u +%FT%TZ) alive=$(python -c 'import json;print(json.load(open("data/scan.json"))["alive"])')"
+      - name: Push
+        if: "!contains(git log -1 --pretty=%s, 'no-change')"
+        run: git push
+
+  deep:
+    if: github.event_name != 'workflow_dispatch' || inputs.deep == 'deep'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Deep refine (L1+L2+L3+L4 on runner egress)
+        run: python src/refine.py --l4
+      - name: Commit refined pool
+        run: |
+          git config user.name "cf-pool-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/refined.json
+          git commit -m "refine: $(date -u +%FT%TZ) final=$(python -c 'import json;print(json.load(open("data/refined.json"))["final"])')" || echo "no change"
+      - name: Push
+        run: git push

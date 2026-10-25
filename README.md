@@ -1,0 +1,1 @@
+cf-region-exit-pool: dual-frequency CF clean-exit pool (HK/SG/JP/US). Fast scan every 15min, deep 4-layer refine every 6h. Worker proxies forward+reverse via the pool.

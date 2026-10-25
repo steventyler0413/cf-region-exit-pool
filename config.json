@@ -1,0 +1,30 @@
+{
+  "source": "https://zip.cm.edu.kg/",
+  "targets": [
+    "HK",
+    "SG",
+    "JP",
+    "US"
+  ],
+  "ports": [
+    "443",
+    "8443",
+    "2053",
+    "2083",
+    "2087",
+    "2096"
+  ],
+  "probe_ports": [
+    "443",
+    "8443"
+  ],
+  "refine_ports": [
+    "443",
+    "8443"
+  ],
+  "attempts": 3,
+  "timeout_s": 2,
+  "max_workers": 128,
+  "top_for_L4": 150,
+  "L4_enabled_in_workflow": true
+}
