@@ -5,7 +5,6 @@ L4 runs only when --l4 passed (on a clean-egress runner; 22 egress is throttled)
 import zipfile, io, json, time, socket, ssl, base64, os, urllib.request, urllib.parse, ipaddress, struct, sys
 from concurrent.futures import ThreadPoolExecutor
 
-UUID_HEX="d37f6de7d1b24fe6a321242878dca3b8"
 VLESS_UUID=""  # removed for public repo; read from env/secret
 WS_SNI=""  # removed for public repo; read from env/secret
 WS_PATH="/"
