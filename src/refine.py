@@ -135,10 +135,10 @@ def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
         res["ws_ok"] = True
         # VLESS: request the target via the tunnel. edgetunnel worker forwards to a
         # remote host; to measure pure bandwidth we tunnel to speed.cloudflare.com:443.
-        _ws_send_binary(w, _build_vless_connect("proof.ovh.net", 80))
+        _ws_send_binary(w, _build_vless_connect("dl.google.com", 443))
         # Send an HTTP GET through the tunnel to actually pull 1MB and measure.
         try:
-            w.sendall(b"GET /files/1Mb.dat HTTP/1.0\r\nHost: proof.ovh.net\r\n\r\n")
+            w.sendall(b"GET /chrome/linux/current/chrome-linux64-64.deb HTTP/1.1\r\nHost: dl.google.com\r\nRange: bytes=0-1048575\r\nConnection: close\r\n\r\n")
         except Exception:
             pass
         # Read for up to 8s / mb MB. VLESS server may reply with a TLS-encrypted
