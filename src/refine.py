@@ -119,6 +119,21 @@ def _build_vless_connect(target_ip, target_port, cmd=1):
     b += struct.pack(">H", target_port)
     return bytes(b)
 
+def _resolve_ip(host):
+    """Resolve a host (domain or IP) to a plain IPv4 string for the VLESS connect frame."""
+    import socket as _sk
+    if _sk.inet_aton(host) and host.count(".") == 3 and host.isalnum() if host.isdigit() else False:
+        pass
+    # simplest: try inet_aton (works if it's already an IP), else gethostbyname
+    try:
+        _sk.inet_aton(host)
+        return host  # already an IPv4
+    except OSError:
+        try:
+            return _sk.gethostbyname(host)
+        except Exception:
+            return host  # leave as-is; caller will fail the L4 test
+
 def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
     """Build VLESS-WS tunnel to ip:port, connect to speed.cloudflare.com:443,
     read for up to 8s or `mb` MB, return (mbps, ws_ok)."""
@@ -135,10 +150,13 @@ def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
         res["ws_ok"] = True
         # VLESS: request the target via the tunnel. edgetunnel worker forwards to a
         # remote host; to measure pure bandwidth we tunnel to speed.cloudflare.com:443.
-        _ws_send_binary(w, _build_vless_connect("dl.google.com", 443))
-        # Send an HTTP GET through the tunnel to actually pull 1MB and measure.
+        tgt_host = "dl.google.com"
+        tgt_ip = _resolve_ip(tgt_host)
+        _ws_send_binary(w, _build_vless_connect(tgt_ip, 80))
+        # Send an HTTP GET through the tunnel to pull 1MB (chunk) and measure bandwidth.
         try:
-            w.sendall(b"GET /chrome/linux/current/chrome-linux64-64.deb HTTP/1.1\r\nHost: dl.google.com\r\nRange: bytes=0-1048575\r\nConnection: close\r\n\r\n")
+            w.sendall((f"GET /chrome/linux/current/chrome-linux64-64.deb HTTP/1.1\r\n"
+                       f"Host: {tgt_host}\r\nRange: bytes=0-1048575\r\nConnection: close\r\n\r\n").encode())
         except Exception:
             pass
         # Read for up to 8s / mb MB. VLESS server may reply with a TLS-encrypted
