@@ -345,13 +345,12 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
 
 
     def _port_buckets(cfg, r):
-    """Return the combined IP bucket for region r across cfg['refine_ports']."""
-    ips = set()
-    for p in cfg.get("refine_ports", ["443"]):
-        ips |= buckets.get((r, p), [])
-    return ips
+        ips = set()
+        for p in cfg.get("refine_ports", ["443"]):
+            ips |= buckets.get((r, p), [])
+        return ips
 
-def regions_of(ip):
+    def regions_of(ip):
         return [r for r in cfg["targets"] if ip in _port_buckets(cfg, r)]
 
     out_data = {
