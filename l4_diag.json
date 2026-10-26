@@ -1,12 +1,12 @@
 {
-  "ts": "2026-10-26T02:54:56Z",
+  "ts": "2026-10-26T03:28:15Z",
   "runner": "runnervmtai0g",
   "direct_speed_err": "HTTP Error 403: Forbidden",
-  "vless_ws_207.57.123.112": "HTTP/1.1 101 Switching Protocols",
+  "vless_ws_207.57.123.112": "ERR:_ssl.c:999: The handshake operation timed out",
   "vless_ws_193.200.130.20": "HTTP/1.1 101 Switching Protocols",
   "refined_L4_enabled": true,
   "refined_top_per_region": 10,
   "refined_mb_gt0": 0,
   "refined_ws_ok": 40,
-  "refined_updated_at": "2026-10-26T02:54:56Z"
+  "refined_updated_at": "2026-10-26T03:28:15Z"
 }
