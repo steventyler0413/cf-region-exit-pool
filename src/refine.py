@@ -223,7 +223,7 @@ def _ws_send_text_bin(ws, payload):
     f += bytes(payload[i] ^ m[i % 4] for i in range(ln))
     ws.sendall(bytes(f))
 
-def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
+def l4_http_speed(ip, port, mb=5, sni=WS_SNI):
     """Simulate a full v2ray VLESS-WS client:
     1) WS upgrade to ip:port (SNI=edgetunnel-hk, path=/)
     2) VLESS v1 header (17 bytes)
@@ -269,8 +269,7 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
         w.settimeout(15)
         try:
             srv_resp = _ws_recv_binary(w)
-            print(f"[L4 {ip}:{port}] TLS server response: {len(srv_resp)} bytes")
-            if len(srv_resp) == 0:
+                if len(srv_resp) == 0:
                 res["vless_ok"] = False
                 w.close()
                 return res
@@ -365,7 +364,7 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 top_tasks.append((ip, port, s, reg))
         tv = time.time()
         with ThreadPoolExecutor(max_workers=12) as ex:
-            sp = {(t[0], t[1]): ex.submit(l4_vless_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
+            sp = {(t[0], t[1]): ex.submit(l4_http_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
             for (ip, port, s, reg) in top_tasks:
                 r = sp[(ip, port)].result()
                 s["mbps"] = r["mbps"]
