@@ -134,14 +134,97 @@ def _resolve_ip(host):
         except Exception:
             return host  # leave as-is; caller will fail the L4 test
 
+class _TunnelSocket:
+    """Minimal socket-like object that proxies read/write through an already
+    established VLESS-WS tunnel (an ssl-wrapped WebSocket). Used to run an
+    *inner* TLS handshake on top of the tunnel, so we can reach TLS-only
+    targets (like spurl behind Cloudflare)."""
+    def __init__(self, underlying, timeout=15):
+        self._s = underlying
+        self._buf = b""
+        self._closed = False
+        self._s.settimeout(timeout)
+    def fileno(self):
+        return -1  # signals not a real fd; ssl will use makefile paths
+    def settimeout(self, v):
+        self._s.settimeout(v)
+    def recv(self, n, flags=0):
+        if self._closed:
+            raise OSError("tunnel closed")
+        if self._buf:
+            chunk = self._buf[:n]
+            self._buf = self._buf[len(chunk):]
+            return chunk
+        try:
+            return self._s.recv(n, flags)
+        except Exception as ex:
+            raise OSError(str(ex))
+    def sendall(self, data, flags=0):
+        if self._closed:
+            raise OSError("tunnel closed")
+        self._s.sendall(data, flags)
+    def send(self, data, flags=0):
+        self.sendall(data, flags)
+        return len(data)
+    def close(self):
+        self._closed = True
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+def _ws_recv_binary(ws):
+    """Read one binary WebSocket frame (client->server is masked, server->client
+    is not). Returns payload bytes. Handles 7/16/64-bit lengths."""
+    import struct as _st
+    b1 = ws.recv(1)
+    b2 = ws.recv(1)
+    if not b1 or not b2:
+        return b""
+    op = b1[0] & 0x0F
+    ln = b2[0] & 0x7F
+    if ln == 126:
+        ln = _st.unpack(">H", ws.recv(2))[0]
+    elif ln == 127:
+        ln = _st.unpack(">Q", ws.recv(8))[0]
+    masked = b2[0] & 0x80
+    key = ws.recv(4) if masked else b""
+    payload = b""
+    got = 0
+    while got < ln:
+        chunk = ws.recv(ln - got)
+        if not chunk:
+            break
+        payload += chunk
+        got += len(chunk)
+    if masked:
+        unmask = bytes(payload[i] ^ key[i % 4] for i in range(len(payload)))
+        return unmask
+    return payload
+
+def _ws_send_text_bin(ws, payload):
+    """Send a binary WS frame (client->server, masked)."""
+    import struct as _st
+    m = os.urandom(4)
+    ln = len(payload)
+    f = bytearray([0x82])
+    if ln < 126:
+        f.append(0x80 | ln)
+    elif ln < 65536:
+        f.append(0x80 | 126); f += _st.pack(">H", ln)
+    else:
+        f.append(0x80 | 127); f += _st.pack(">Q", ln)
+    f += m
+    f += bytes(payload[i] ^ m[i % 4] for i in range(ln))
+    ws.sendall(bytes(f))
+
 def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
-    """Simulate a v2ray client: VLESS-WS tunnel to ip:port -> connect to spurl IP:443
-    -> inner TLS to spurl host -> GET /5mb -> measure end-to-end bandwidth."""
+    """Simulate a full v2ray client:
+       VLESS-WS tunnel to ip:port -> VLESS connect to spurl IP:443
+       -> inner TLS handshake (spurl is behind CF) -> GET /5mb -> measure bw."""
     res = {"mbps": 0.0, "ws_ok": False}
     tgt_host = "spurl.api.030101.xyz"
     tgt_ip = _resolve_ip(tgt_host)
     if not tgt_ip or tgt_ip == tgt_host:
-        return res  # can't resolve target
+        return res
     try:
         s = socket.create_connection((ip, int(port)), timeout=8)
         ctx = ssl.create_default_context()
@@ -152,50 +235,59 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             w.close()
             return res
         res["ws_ok"] = True
-        # VLESS connect frame to spurl IP:443
+        # VLESS connect frame (raw VLESS bytes, NOT a WS frame yet -- the server
+        # expects VLESS payloads as WS binary frames)
         _ws_send_binary(w, _build_vless_connect(tgt_ip, 443))
-        # Inner TLS ClientHello to the target host (VLESS now carries raw TCP to target)
-        try:
-            import ssl as _ssl_in
-            # We can't easily re-wrap `w` (TLS socket) for inner TLS directly; instead
-            # send a raw TLS ClientHello and then read the TLS-encrypted stream is not
-            # feasible without a real TLS stack. Pragmatic approach: the edgetunnel
-            # worker, after the VLESS connect, forwards a raw TCP stream to spurl:443.
-            # The target speaks TLS. To measure bandwidth we just send a TLS
-            # ClientHello + HTTP GET over that stream and count bytes that flow back.
-            # Build a minimal TLS 1.2 ClientHello:
-            ch = b"\x16\x03\x01\x00\x50"
-            ch += b"\x03\x03" + os.urandom(32)
-            ch += b"\x00" * 2  # session id
-            ch += b"\x00" * 0  # ciphers (server picks)
-            ch += b"\x00\x01" + b"\x00"  # 1 compression
-            w.sendall(ch)
-            # Send HTTP GET after TLS setup (best-effort; the tunnel counts bytes)
+        # Now run inner TLS over the tunnel: wrap a TunnelSocket around `w`.
+        # VLESS payload bytes travel inside WS binary frames, but for the inner
+        # TLS handshake we must send each TLS record as a WS binary frame and
+        # read server->client WS frames for replies. We implement this by
+        # monkey-patching w's recv/sendall at the TLS layer via TunnelSocket,
+        # where sendall = "wrap in a WS binary frame" and recv = "read next
+        # WS binary frame".
+        class _WsTunnel:
+            def __init__(self, ws, timeout=20):
+                self.ws = ws
+                self.ws.settimeout(timeout)
+            def fileno(self): return -1
+            def settimeout(self, v): self.ws.settimeout(v)
+            def sendall(self, data, *a, **k):
+                _ws_send_text_bin(self.ws, bytes(data))
+            def send(self, data, *a, **k):
+                self.sendall(data); return len(data)
+            def recv(self, n, *a, **k):
+                return _ws_recv_binary(self.ws)
+            def close(self):
+                try: self.ws.close()
+                except: pass
+        wst = _WsTunnel(w, timeout=20)
+        ictx = ssl.create_default_context()
+        ictx.check_hostname = False
+        ictx.verify_mode = ssl.CERT_NONE
+        itls = ictx.wrap_socket(wst, server_hostname=tgt_host, do_handshake_on_connect=True)
+        # Send HTTP GET /5mb through the inner TLS
+        req = f"GET /{mb}mb HTTP/1.1\r\nHost: {tgt_host}\r\nConnection: close\r\n\r\n"
+        itls.sendall(req.encode())
+        itls.settimeout(20)
+        got = 0
+        t_dl = time.time()
+        while got < mb * 1024 * 1024:
             try:
-                w.sendall((f"GET /5mb HTTP/1.1\r\nHost: {tgt_host}\r\n"
-                            f"Connection: close\r\n\r\n").encode())
-            except Exception:
-                pass
-            got = 0
-            t_dl = time.time()
-            deadline = time.time() + 15
-            while got < mb * 1024 * 1024 and time.time() < deadline:
-                try:
-                    c2 = w.recv(65536)
-                except socket.timeout:
-                    break
-                if not c2:
-                    break
-                got += len(c2)
-            dt = max(time.time() - t_dl, 0.001)
-            res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
-            res["ws_ok"] = got > 0
-        except Exception:
-            pass
-        w.close()
+                chunk = itls.recv(65536)
+            except (socket.timeout, OSError, ssl.SSLError):
+                break
+            if not chunk:
+                break
+            got += len(chunk)
+        dt = max(time.time() - t_dl, 0.001)
+        res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
+        res["ws_ok"] = got > 0
+        try: itls.close()
+        except: pass
     except Exception:
         pass
     return res
+
 
 
 def run(config_path="config.json", out="data/refined.json", l4=False):
