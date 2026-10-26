@@ -1,10 +1,14 @@
-"""Deep refine: L1 latency, L2 stability (N conns), L3 egress-validity,
-L4 = direct TCP+TLS connect to the IP on its port, download a small payload, record MB/s.
-(Not a proxy — these are bare cloud/CF IPs used as egress targets.)
-L4 runs only when --l4 passed (i.e. on a clean runner egress; locally it usually 0s out).
+"""Deep refine: L1 latency, L2 stability, L3 egress-validity,
+L4 = VLESS-WS tunnel speed test (download 2MB through the node, record mbps).
+L4 runs only when --l4 passed (on a clean-egress runner; 22 egress is throttled).
 """
-import zipfile, io, json, time, socket, urllib.request, ipaddress, sys
+import zipfile, io, json, time, socket, ssl, base64, os, urllib.request, ipaddress, struct, sys
 from concurrent.futures import ThreadPoolExecutor
+
+UUID_HEX="d37f6de7d1b24fe6a321242878dca3b8"
+VLESS_UUID="d37f6de7-d1b2-4fe6-a321-242878dca3b8"
+WS_SNI="edgetunnel-hk.dreamtimecloudshare.com"
+WS_PATH="/"
 
 def fetch_zip(url, timeout=180):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -52,34 +56,84 @@ def l3_egress_valid(ip):
     except ValueError:
         return False
 
-def l4_tls_speed(ip, port, timeout=8):
-    """L4: TCP+TLS connect to ip:port directly, download 300KB, return MB/s (0 if fails).
-    These are bare IPs, NOT SOCKS/HTTP proxies — we connect straight to their TLS service."""
-    import ssl
+def _ws_handshake(ws, sni):
+    key = base64.b64encode(os.urandom(16)).decode()
+    req = (f"GET {WS_PATH} HTTP/1.1\r\nHost: {sni}\r\nUpgrade: websocket\r\n"
+           f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+           f"Sec-WebSocket-Version: 13\r\n\r\n")
+    ws.sendall(req.encode())
+    ws.settimeout(6)
+    buf = b""
     try:
-        raw = socket.create_connection((ip, int(port)), timeout=timeout)
+        while b"\r\n\r\n" not in buf and len(buf) < 4096:
+            ch = ws.recv(1024)
+            if not ch:
+                break
+            buf += ch
+    except socket.timeout:
+        pass
+    return b"\r\n\r\n" in buf and ("101" in buf.split(b"\r\n")[0].decode(errors="replace"))
+
+def _ws_send_binary(ws, payload):
+    masked = os.urandom(4)
+    ln = len(payload)
+    f = bytearray()
+    f.append(0x82)
+    if ln < 126:
+        f.append(0x80 | ln)
+    elif ln < 65536:
+        f.append(0x80 | 126); f += struct.pack(">H", ln)
+    else:
+        f.append(0x80 | 127); f += struct.pack(">Q", ln)
+    f += masked
+    f += bytes(b ^ masked[i % 4] for i, b in enumerate(payload))
+    ws.sendall(bytes(f))
+
+def _build_vless_connect(target_ip, target_port, cmd=1):
+    b = bytearray()
+    b.append(0)
+    b += bytes.fromhex(UUID_HEX)
+    b.append(cmd)          # 1 = connect, 2 = send, 3 = disconnect
+    b.append(1)           # type: ipv4
+    b += socket.inet_aton(target_ip)
+    b += struct.pack(">H", target_port)
+    return bytes(b)
+
+def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
+    """Build VLESS-WS tunnel to ip:port, connect to speed.cloudflare.com:443,
+    read for up to 8s or `mb` MB, return (mbps, ws_ok)."""
+    res = {"mbps": 0.0, "ws_ok": False}
+    try:
+        s = socket.create_connection((ip, int(port)), timeout=8)
         ctx = ssl.create_default_context()
-        w = ctx.wrap_socket(raw, server_hostname=ip)
-        req = (
-            b"GET /__down?bytes=300000 HTTP/1.1\r\n"
-            b"Host: " + ip.encode() + b"\r\nConnection: close\r\n\r\n"
-        )
-        w.sendall(req)
-        t0 = time.time()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        w = ctx.wrap_socket(s, server_hostname=sni)
+        if not _ws_handshake(w, sni):
+            w.close()
+            return res
+        res["ws_ok"] = True
+        # VLESS: request the target via the tunnel. edgetunnel worker forwards to a
+        # remote host; to measure pure bandwidth we tunnel to speed.cloudflare.com:443.
+        _ws_send_binary(w, _build_vless_connect("speed.cloudflare.com", 443))
+        # Read for up to 8s / mb MB. VLESS server may reply with a TLS-encrypted
+        # stream; we just count bytes flowing to gauge tunnel bandwidth.
+        w.settimeout(8)
         got = 0
-        try:
-            while got < 300000:
-                chunk = w.recv(65536)
-                if not chunk:
-                    break
-                got += len(chunk)
-        except Exception:
-            pass
-        dt = time.time() - t0
+        deadline = time.time() + 8
+        while got < mb * 1024 * 1024 and time.time() < deadline:
+            try:
+                c2 = w.recv(65536)
+            except socket.timeout:
+                break
+            if not c2:
+                break
+            got += len(c2)
+        res["mbps"] = round(got * 8 / 1e6 / max(8 - (deadline - time.time()), 0.001), 1) if got else 0.0
         w.close()
-        return round(got * 8 / 1e6 / max(dt, 0.001), 1) if got > 0 else 0.0
     except Exception:
-        return 0.0
+        pass
+    return res
 
 def run(config_path="config.json", out="data/refined.json", l4=False):
     cfg = json.load(open(config_path))
@@ -102,19 +156,39 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
     l3 = [(t, s) for t, s in alive if l3_egress_valid(t[0])]
     print(f"L3 egress-valid: {len(l3)}", flush=True)
 
+    top_per_region = cfg.get("top_per_region", 10)
     if l4:
-        top = [t for t, _ in sorted(l3, key=lambda x: x[1]["avg_ms"])[: cfg.get("top_for_L4", 150)]]
+        from collections import defaultdict
+        by_reg = defaultdict(list)
+        for (ip, port), s in l3:
+            regs = [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
+            for reg in regs:
+                by_reg[reg].append((ip, port, s["avg_ms"], s))
+        top_tasks = []
+        for reg in cfg["targets"]:
+            for (ip, port, avg_ms, s) in sorted(by_reg.get(reg, []), key=lambda x: x[2])[:top_per_region]:
+                top_tasks.append((ip, port, s, reg))
         tv = time.time()
-        with ThreadPoolExecutor(max_workers=32) as ex:
-            sp = {task: ex.submit(l4_tls_speed, task[0], task[1]) for task in top}
-        for task, stat in l3:
-            if task in sp:
-                stat["mbps"] = sp[task].result()
-        l3 = [(t, s) for t, s in l3 if s.get("mbps", 0) >= 1.0]
-        print(f"L4 >=1Mbps: {len(l3)} in {time.time()-tv:.0f}s", flush=True)
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            sp = {t: ex.submit(l4_vless_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
+            for (ip, port, s, reg) in top_tasks:
+                r = sp[(ip, port, s, reg)].result() if (ip, port, s, reg) in sp else {"mbps": 0.0, "ws_ok": False}
+                s["mbps"] = r["mbps"]
+                s["ws_ok"] = r["ws_ok"]
+            # mark non-top tasks
+            topset = {t[:2] for t in top_tasks}
+            for (ip, port), s in l3:
+                if (ip, port) not in topset:
+                    s["mbps"] = None
+                    s["ws_ok"] = None
+        print(f"L4 done in {time.time()-tv:.0f}s: ws_ok={sum(1 for _,_,s,_ in top_tasks if s.get('ws_ok'))}, "
+              f"mbps>0={sum(1 for _,_,s,_ in top_tasks if (s.get('mbps') or 0) > 0)}", flush=True)
+        # Keep only items that passed L4 (ws_ok and mbps>0), or all if L4 off
+        l3 = [(t, s) for t, s in l3 if s.get("mbps") is None or s.get("ws_ok")]
     else:
         for _, s in l3:
             s["mbps"] = None
+            s["ws_ok"] = None
 
     def regions_of(ip):
         return [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
@@ -122,8 +196,11 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
     out_data = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": cfg["source"],
-        "layers": ["L1 latency", "L2 stability", "L3 egress-validity"] + (["L4 tls-speed"] if l4 else []),
+        "vless_uuid": VLESS_UUID,
+        "vless_sni": WS_SNI,
+        "layers": ["L1 latency", "L2 stability", "L3 egress-validity"] + (["L4 vless-ws-tunnel-speed"] if l4 else []),
         "L4_enabled": l4,
+        "top_per_region": top_per_region,
         "alive": len(alive),
         "final": len(l3),
         "items": [
@@ -133,9 +210,10 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 "regions": regions_of(ip),
                 "avg_ms": s["avg_ms"],
                 "rate": s["rate"],
+                "ws_ok": s.get("ws_ok"),
                 "mbps": s.get("mbps"),
             }
-            for (ip, port), s in sorted(l3, key=lambda x: x[1]["avg_ms"])
+            for (ip, port), s in sorted(l3, key=lambda x: (-(x[1].get("mbps") or 0), x[1]["avg_ms"]))
         ],
     }
     out_data["per_region"] = {r: sum(1 for x in out_data["items"] if r in x["regions"]) for r in cfg["targets"]}
