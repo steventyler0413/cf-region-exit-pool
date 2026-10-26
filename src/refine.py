@@ -259,6 +259,22 @@ def l4_http_speed(ip, port, mb=5, sni=WS_SNI):
     except Exception:
         pass
     return res
+def l5_ws_101(ip, port, sni=WS_SNI):
+    """L5: VLESS-WS 101 验证 — only run on IPs that passed L4 (mbps>0).
+    Confirms the IP can also establish a VLESS-WS tunnel (回101),
+    adding a 'usable as v2ray ws entry' flag. Returns True/False."""
+    try:
+        s = socket.create_connection((ip, int(port)), timeout=6)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        w = ctx.wrap_socket(s, server_hostname=sni)
+        ok = _ws_handshake(w, sni)
+        w.close()
+        return ok
+    except Exception:
+        return False
+
 
 
 def run(config_path="config.json", out="data/refined.json", l4=False):
@@ -290,10 +306,18 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
             regs = [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
             for reg in regs:
                 by_reg[reg].append((ip, port, s["avg_ms"], s))
+
+        # L4 candidate base: ALL L3-passed IPs (L4 is pure direct-HTTPS, does NOT
+        # touch CF, so full scan is cheap). If cfg limits it, use top_per_region.
+        l4_full = cfg.get("l4_full_scan", True)
         top_tasks = []
         for reg in cfg["targets"]:
-            for (ip, port, avg_ms, s) in sorted(by_reg.get(reg, []), key=lambda x: x[2])[:top_per_region]:
-                top_tasks.append((ip, port, s, reg))
+            candidates = sorted(by_reg.get(reg, []), key=lambda x: x[2])
+            if l4_full:
+                top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in candidates])
+            else:
+                top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in candidates[:top_per_region]])
+
         tv = time.time()
         with ThreadPoolExecutor(max_workers=12) as ex:
             sp = {(t[0], t[1]): ex.submit(l4_http_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
@@ -301,6 +325,23 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 r = sp[(ip, port)].result()
                 s["mbps"] = r["mbps"]
                 s["ws_ok"] = r["ws_ok"]
+                s["regions"] = reg
+        l4_done = time.time() - tv
+        print(f"L4 done in {l4_done:.0f}s: mbps>0={sum(1 for _,s in l3 if (s.get('mbps') or 0)>0)}", flush=True)
+
+        # L5: only on L4-confirmed IPs (mbps>0). VLESS-WS 101 verification.
+        # This IS a CF request (WS upgrade), so keep it limited to L4-passed IPs only.
+        l5_confirm = cfg.get("l5_only_l4_confirmed", True)
+        l5_targets = []
+        for reg in cfg["targets"]:
+            reg_ips = [s for (ip, port, avg_ms, s) in top_tasks if reg in (s.get("regions") if isinstance(s.get("regions"),list) else [s.get("regions")]) ]
+        # simpler: gather all s with mbps>0
+        confirmed = [s for (_, s) in l3 if (s.get("mbps") or 0) > 0]
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in confirmed}
+            for s in confirmed:
+                s["tunnel_ok"] = l5_futs[id(s)].result()
+        print(f"L5 done: tunnel_ok={sum(1 for s in confirmed if s.get('tunnel_ok'))}/{len(confirmed)} (L4-confirmed only)", flush=True)
             # mark non-top tasks
             topset = {t[:2] for t in top_tasks}
             for (ip, port), s in l3:
