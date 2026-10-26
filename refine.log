@@ -1,3 +1,5 @@
-  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 272
-    if len(srv_resp) == 0:
-IndentationError: unexpected indent
+refining 3164 (ip,port)
+L1/L2 alive: 3155 (15s)
+L3 egress-valid: 3155
+L4 done in 12s: ws_ok=40, mbps>0=40
+final 3155 -> data/refined.json
