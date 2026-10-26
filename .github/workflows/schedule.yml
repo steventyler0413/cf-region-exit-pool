@@ -12,6 +12,11 @@ on:
         required: false
         default: fast
         options: [fast, deep]
+      zipdiag:
+        description: "zip reachability diag"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   fast:
@@ -108,3 +113,63 @@ jobs:
           git add l4_diag.json data/refined.json refine.log 2>/dev/null
           git commit -q -m "deep diag $(date -u +%s)" || echo "nothing to commit"
           git push -q || echo "push skip"
+
+
+  zipdiag:
+    if: ${{ inputs.zipdiag == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 - <<'PY'
+          import urllib.request, json, time
+          UA={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+              "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.8",
+              "Accept-Encoding":"gzip, deflate, br",
+              "Referer":"https://www.google.com/",
+              "Connection":"close"}
+          out={}
+          for label, url, follow in [
+              ("root_no_redirect","https://zip.cm.edu.kg/",False),
+              ("root_follow","https://zip.cm.edu.kg/",True),
+              ("with_full_headers","https://zip.cm.edu.kg/",True),
+          ]:
+              entry={}
+              try:
+                  req=urllib.request.Request(url, headers=UA)
+                  if not follow:
+                      import http.client, ssl
+                      c=http.client.HTTPSConnection("zip.cm.edu.kg")
+                      c.request("GET","/",headers=UA)
+                      r=c.getresponse()
+                      entry["http_code"]=r.status
+                      entry["final_url"]=r.getheader("Location","")
+                      entry["size"]=0
+                  else:
+                      t0=time.time()
+                      r=urllib.request.urlopen(req, timeout=60)
+                      data=r.read()
+                      entry["http_code"]=200
+                      entry["final_url"]=r.geturl()
+                      entry["size"]=len(data)
+                      entry["seconds"]=round(time.time()-t0,1)
+                      entry["content_type"]=r.headers.get("Content-Type","")
+                      entry["is_zip"]=data[:4]==b"PK\x03\x04"
+                  out[label]=entry
+              except urllib.error.HTTPError as ex:
+                  out[label]={"http_code":ex.code,"error":str(ex)[:80]}
+              except Exception as ex:
+                  out[label]={"error":str(ex)[:80]}
+              time.sleep(1)
+          json.dump(out, open("diag_zip.json","w"), indent=2)
+          print("zip diag:", json.dumps(out, indent=2))
+          PY
+      - name: Commit diag
+        if: always()
+        run: |
+          git config user.name "cf-pool-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add diag_zip.json
+          git commit -q -m "zip diag $(date -u +%s)" || echo "no change"
+          git push -q || echo "push skip (no write token)"
