@@ -307,16 +307,14 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
             for reg in regs:
                 by_reg[reg].append((ip, port, s["avg_ms"], s))
 
-        # L4 candidate base: ALL L3-passed IPs (L4 is pure direct-HTTPS, does NOT
-        # touch CF, so full scan is cheap). If cfg limits it, use top_per_region.
+        # L4 candidate base: L4_full_scan=True -> ALL L3-passed IPs (direct HTTPS, no CF cost).
+        # L4_full_scan=False -> only top_per_region per region.
         l4_full = cfg.get("l4_full_scan", True)
         top_tasks = []
         for reg in cfg["targets"]:
             candidates = sorted(by_reg.get(reg, []), key=lambda x: x[2])
-            if l4_full:
-                top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in candidates])
-            else:
-                top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in candidates[:top_per_region]])
+            sel = candidates if l4_full else candidates[:top_per_region]
+            top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in sel])
 
         tv = time.time()
         with ThreadPoolExecutor(max_workers=12) as ex:
@@ -325,37 +323,22 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 r = sp[(ip, port)].result()
                 s["mbps"] = r["mbps"]
                 s["ws_ok"] = r["ws_ok"]
-                s["regions"] = reg
         l4_done = time.time() - tv
-        print(f"L4 done in {l4_done:.0f}s: mbps>0={sum(1 for _,s in l3 if (s.get('mbps') or 0)>0)}", flush=True)
+        print(f"L4 done in {l4_done:.0f}s: mbps>0={sum(1 for _,s in l3 if (s.get('mbps') or 0)>0)}/{len(l3)}", flush=True)
 
-        # L5: only on L4-confirmed IPs (mbps>0). VLESS-WS 101 verification.
-        # This IS a CF request (WS upgrade), so keep it limited to L4-passed IPs only.
-        l5_confirm = cfg.get("l5_only_l4_confirmed", True)
-        l5_targets = []
-        for reg in cfg["targets"]:
-            reg_ips = [s for (ip, port, avg_ms, s) in top_tasks if reg in (s.get("regions") if isinstance(s.get("regions"),list) else [s.get("regions")]) ]
-        # simpler: gather all s with mbps>0
-        confirmed = [s for (_, s) in l3 if (s.get("mbps") or 0) > 0]
+        # L5: VLESS-WS 101 verification, ONLY on L4-confirmed IPs (mbps>0).
+        l5_confirmed = [s for (_, s) in l3 if (s.get("mbps") or 0) > 0]
         with ThreadPoolExecutor(max_workers=12) as ex:
-            l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in confirmed}
-            for s in confirmed:
+            l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in l5_confirmed}
+            for s in l5_confirmed:
                 s["tunnel_ok"] = l5_futs[id(s)].result()
-        print(f"L5 done: tunnel_ok={sum(1 for s in confirmed if s.get('tunnel_ok'))}/{len(confirmed)} (L4-confirmed only)", flush=True)
-            # mark non-top tasks
-            topset = {t[:2] for t in top_tasks}
-            for (ip, port), s in l3:
-                if (ip, port) not in topset:
-                    s["mbps"] = None
-                    s["ws_ok"] = None
-        print(f"L4 done in {time.time()-tv:.0f}s: ws_ok={sum(1 for _,_,s,_ in top_tasks if s.get('ws_ok'))}, "
-              f"mbps>0={sum(1 for _,_,s,_ in top_tasks if (s.get('mbps') or 0) > 0)}", flush=True)
-        # Keep only items that passed L4 (ws_ok and mbps>0), or all if L4 off
-        l3 = [(t, s) for t, s in l3 if s.get("mbps") is None or s.get("ws_ok")]
+        print(f"L5 done: tunnel_ok={sum(1 for s in l5_confirmed if s.get('tunnel_ok'))}/{len(l5_confirmed)} (L4-confirmed only)", flush=True)
     else:
         for _, s in l3:
             s["mbps"] = None
             s["ws_ok"] = None
+            s["tunnel_ok"] = None
+
 
     def regions_of(ip):
         return [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
@@ -365,7 +348,7 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
         "source": cfg["source"],
         "vless_uuid": VLESS_UUID,
         "vless_sni": WS_SNI,
-        "layers": ["L1 latency", "L2 stability", "L3 egress-validity"] + (["L4 vless-ws-tunnel-speed"] if l4 else []),
+        "layers": ["L1 latency", "L2 stability", "L3 egress-validity"] + (["L4 http-speed", "L5 vless-ws-101"] if l4 else []),
         "L4_enabled": l4,
         "top_per_region": top_per_region,
         "alive": len(alive),
@@ -379,6 +362,7 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 "rate": s["rate"],
                 "ws_ok": s.get("ws_ok"),
                 "mbps": s.get("mbps"),
+                "tunnel_ok": s.get("tunnel_ok"),
             }
             for (ip, port), s in sorted(l3, key=lambda x: (-(x[1].get("mbps") or 0), x[1]["avg_ms"]))
         ],
