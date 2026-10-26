@@ -6,8 +6,8 @@ import zipfile, io, json, time, socket, ssl, base64, os, urllib.request, urllib.
 from concurrent.futures import ThreadPoolExecutor
 
 UUID_HEX="d37f6de7d1b24fe6a321242878dca3b8"
-VLESS_UUID="d37f6de7-d1b2-4fe6-a321-242878dca3b8"
-WS_SNI="edgetunnel-hk.dreamtimecloudshare.com"
+VLESS_UUID=""  # removed for public repo; read from env/secret
+WS_SNI=""  # removed for public repo; read from env/secret
 WS_PATH="/"
 
 def fetch_zip(url, timeout=180):
