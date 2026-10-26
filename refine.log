@@ -1,5 +1,5 @@
 refining 3196 (ip,port)
-L1/L2 alive: 3157 (18s)
-L3 egress-valid: 3157
-L4 done in 59s: ws_ok=38, mbps>0=0
-final 3155 -> data/refined.json
+L1/L2 alive: 3141 (17s)
+L3 egress-valid: 3141
+L4 done in 59s: ws_ok=40, mbps>0=0
+final 3141 -> data/refined.json
