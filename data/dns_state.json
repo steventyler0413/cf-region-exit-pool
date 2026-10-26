@@ -1,0 +1,31 @@
+{
+  "dns": {
+    "hk": {
+      "ip": "198.20.133.121",
+      "mbps": 3.8,
+      "updated": 1792994051952,
+      "fallback": false
+    },
+    "sg": {
+      "ip": "156.244.57.227",
+      "mbps": 3.5,
+      "updated": 1792994051952,
+      "fallback": false
+    },
+    "jp": {
+      "ip": "45.95.212.186",
+      "mbps": 5.2,
+      "updated": 1792994051952,
+      "fallback": false
+    },
+    "us": {
+      "ip": "150.136.236.251",
+      "mbps": 37.9,
+      "updated": 1792994051952,
+      "fallback": false
+    }
+  },
+  "fail": {},
+  "lastMainUpdate": 1792994051952,
+  "lastQuality": null
+}
