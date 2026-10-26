@@ -310,10 +310,14 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
         # L4 candidate base: L4_full_scan=True -> ALL L3-passed IPs (direct HTTPS, no CF cost).
         # L4_full_scan=False -> only top_per_region per region.
         l4_full = cfg.get("l4_full_scan", True)
+        l4_cap = cfg.get("l4_max_per_region", 30)  # cap even in full-scan mode
         top_tasks = []
         for reg in cfg["targets"]:
             candidates = sorted(by_reg.get(reg, []), key=lambda x: x[2])
-            sel = candidates if l4_full else candidates[:top_per_region]
+            if l4_full:
+                sel = candidates[:l4_cap]   # full-scan but capped to l4_cap per region
+            else:
+                sel = candidates[:top_per_region]
             top_tasks.extend([(ip, port, s, reg) for (ip, port, avg_ms, s) in sel])
 
         tv = time.time()
