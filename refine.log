@@ -1,4 +1,13 @@
-  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 348
-    """Return the combined IP bucket for region r across cfg['refine_ports']."""
-    ^
-IndentationError: expected an indented block after function definition on line 347
+refining 2417 (ip,port)
+L1/L2 alive: 2409 (11s)
+L3 egress-valid: 2409
+Traceback (most recent call last):
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 388, in <module>
+    run(*args, l4=do_l4)
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 306, in run
+    regs = [r for r in cfg["targets"] if ip in _port_buckets(cfg, r)]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 306, in <listcomp>
+    regs = [r for r in cfg["targets"] if ip in _port_buckets(cfg, r)]
+                                               ^^^^^^^^^^^^^
+NameError: cannot access free variable '_port_buckets' where it is not associated with a value in enclosing scope
