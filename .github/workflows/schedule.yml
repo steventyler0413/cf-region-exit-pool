@@ -109,6 +109,62 @@ jobs:
           PY
           echo "=== refine.py L4 end $(date -u +%T) ==="
           exit 0
+      - name: L4 single-IP debug (dl.google.com via VLESS tunnel)
+        if: always() && !cancelled()
+        run: |
+          python3 - <<'PY'
+          import socket,ssl,base64,os,struct,time
+          UUIDH="d37f6de7d1b24fe6a321242878dca3b8"
+          SNI="edgetunnel-hk.dreamtimecloudshare.com"
+          IP,PORT="207.57.123.112",443  # top HK
+          def ws_handshake(w):
+              key=base64.b64encode(os.urandom(16)).decode()
+              w.sendall(f"GET / HTTP/1.1\r\nHost: {SNI}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+              w.settimeout(6); buf=b""
+              try:
+                  while b"\r\n\r\n" not in buf: buf+=w.recv(1024)
+              except: pass
+              return buf.split(b"\r\n")[0].decode(errors="replace")
+          def build_vless_connect(host_ip, port):
+              b=bytearray(); b.append(0); b+=bytes.fromhex(UUIDH); b.append(1); b.append(1)
+              b+=socket.inet_aton(host_ip); b+=struct.pack(">H",port); return bytes(b)
+          def ws_bin(w,payload):
+              m=os.urandom(4); ln=len(payload); f=bytearray([0x82])
+              if ln<126: f.append(0x80|ln)
+              else: f.append(0x80|126); f+=struct.pack(">H",ln)
+              f+=m; f+=bytes(b^m[i%4] for i,b in enumerate(payload)); w.sendall(bytes(f))
+          s=socket.create_connection((IP,PORT),timeout=8)
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          w=ctx.wrap_socket(s,server_hostname=SNI)
+          print("WS upgrade:", ws_handshake(w))
+          # VLESS connect to dl.google.com:443 then TLS + GET 1MB
+          ws_bin(w, build_vless_connect("dl.google.com",443))
+          # now the tunnel should carry TLS to dl.google.com; we must do TLS handshake inside
+          # But we already wrapped the outer socket in TLS (to the edge IP). The VLESS target
+          # is a TCP stream, so after the VLESS connect the edge forwards raw TCP to target.
+          # For dl.google.com:443 we need TLS on top. Send TLS ClientHello:
+          import ssl as _ssl2
+          # Actually simpler: VLESS connect to dl.google.com:80 (plain HTTP) to avoid inner TLS
+          w.close()
+          # retry with port 80
+          s2=socket.create_connection((IP,PORT),timeout=8)
+          ctx2=ssl.create_default_context(); ctx2.check_hostname=False; ctx2.verify_mode=ssl.CERT_NONE
+          w2=ctx2.wrap_socket(s2,server_hostname=SNI)
+          print("WS upgrade2:", ws_handshake(w2))
+          ws_bin(w2, build_vless_connect("dl.google.com",80))
+          # send HTTP GET 1MB
+          w2.sendall(b"GET /chrome/linux/current/chrome-linux64-64.deb HTTP/1.1\r\nHost: dl.google.com\r\nRange: bytes=0-1048575\r\n\r\n")
+          w2.settimeout(8); got=0; t0=time.time()
+          try:
+              while got<1048576:
+                  c2=w2.recv(65536)
+                  if not c2: break
+                  got+=len(c2)
+          except socket.timeout: pass
+          dt=max(time.time()-t0,0.001)
+          print(f"VLESS->dl.google.com:80 GET 1MB: got {got} bytes in {dt:.1f}s = {got*8/1e6/dt:.1f} Mbps")
+          PY
+
       - name: Commit diag + data
         if: always() && !cancelled()
         run: |
