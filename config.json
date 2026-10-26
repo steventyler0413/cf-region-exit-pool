@@ -29,5 +29,6 @@
   "L4_enabled_in_workflow": true,
   "l4_full_scan": true,
   "l5_only_l4_confirmed": true,
-  "l4_mb": 1
+  "l4_mb": 1,
+  "l4_max_per_region": 30
 }
