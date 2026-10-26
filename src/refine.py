@@ -217,17 +217,14 @@ def _ws_send_text_bin(ws, payload):
     ws.sendall(bytes(f))
 
 def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
-    """Full v2ray-client sim against the user's REAL edgetunnel backend:
-    edgetunnel-hk.dreamtimecloudshare.com.
-    VLESS-WS 101 to ip:port -> VLESS connect to the backend's IP:443 ->
-    inner TLS to the edgetunnel domain -> pull bytes (try /5mb, else /) ->
-    measure end-to-end tunnel bandwidth."""
+    """Measure the egress bandwidth of the edgetunnel-hk backend THROUGH a VLESS-WS
+    tunnel to ip:port. All candidate IPs forward to the same edgetunnel-hk host,
+    so this measures the shared egress bandwidth for that entry path."""
     res = {"mbps": 0.0, "ws_ok": False}
     backend_host = "edgetunnel-hk.dreamtimecloudshare.com"
     backend_ip = _resolve_ip(backend_host)
     if not backend_ip or backend_ip == backend_host:
         return res
-    paths = ["/5mb", "/download", "/", "/speedtest", "/files/5mb"]
     try:
         s = socket.create_connection((ip, int(port)), timeout=8)
         ctx = ssl.create_default_context()
@@ -238,9 +235,9 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             w.close()
             return res
         res["ws_ok"] = True
-        # VLESS connect to the backend IP:443
+        # VLESS connect frame to the edgetunnel-hk backend IP:443
         _ws_send_binary(w, _build_vless_connect(backend_ip, 443))
-        # Inner TLS to the backend domain
+        # Inner TLS to the backend domain, then GET / to pull a large body
         class _WsTunnel:
             def __init__(self, ws, timeout=20):
                 self.ws = ws; self.ws.settimeout(timeout)
@@ -253,42 +250,35 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
                 try: self.ws.close()
                 except: pass
         wst = _WsTunnel(w, timeout=20)
-        got_total = 0
-        for path in paths:
+        ictx = ssl.create_default_context()
+        ictx.check_hostname = False
+        ictx.verify_mode = ssl.CERT_NONE
+        itls = ictx.wrap_socket(wst, server_hostname=backend_host, do_handshake_on_connect=True)
+        # Request the root path; if it's small, loop with Range to build up 5MB
+        got = 0
+        t_dl = time.time()
+        deadline = time.time() + 30
+        while got < mb * 1024 * 1024 and time.time() < deadline:
+            # Send successive Range requests to accumulate 5MB
+            start = got
+            itls.sendall((f"GET / HTTP/1.1\r\nHost: {backend_host}\r\n"
+                          f"Range: bytes={start}-{start+524287}\r\n\r\n").encode())
+            itls.settimeout(15)
             try:
-                ictx = ssl.create_default_context()
-                ictx.check_hostname = False
-                ictx.verify_mode = ssl.CERT_NONE
-                itls = ictx.wrap_socket(wst, server_hostname=backend_host, do_handshake_on_connect=True)
-                req = (f"GET {path} HTTP/1.1\r\nHost: {backend_host}\r\n"
-                       f"Range: bytes=0-5242879\r\nConnection: close\r\n\r\n")
-                itls.sendall(req.encode())
-                itls.settimeout(20)
-                got = 0
-                t_dl = time.time()
-                try:
-                    while got < 5 * 1024 * 1024:
-                        c2 = itls.recv(65536)
-                        if not c2:
-                            break
-                        got += len(c2)
-                except (socket.timeout, OSError, ssl.SSLError):
-                    pass
-                dt = max(time.time() - t_dl, 0.001)
-                if got > got_total:
-                    got_total = got
-                    res["mbps"] = round(got * 8 / 1e6 / dt, 1)
-                if got_total >= 1024 * 1024:
-                    break  # got enough, stop trying other paths
-                itls.close()
-            except Exception:
-                # move to next path; reset the tunnel if it broke
-                try:
-                    wst2 = _WsTunnel(w, timeout=20)
-                except Exception:
-                    break
-                wst = wst2
-        res["ws_ok"] = got_total > 0
+                while True:
+                    c2 = itls.recv(65536)
+                    if not c2:
+                        break
+                    got += len(c2)
+                    if got >= mb * 1024 * 1024:
+                        break
+            except (socket.timeout, OSError, ssl.SSLError):
+                break
+        dt = max(time.time() - t_dl, 0.001)
+        res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
+        res["ws_ok"] = got > 0
+        try: itls.close()
+        except: pass
     except Exception:
         pass
     return res
