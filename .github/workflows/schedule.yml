@@ -116,8 +116,8 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add l4_diag.json data/refined.json refine.log 2>/dev/null
           git commit -q -m "deep diag $(date -u +%s)" || echo "nothing to commit"
-          GHURL="https://x-access-token:*** GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-          git push -q "$GHURL" || echo "push skip"
+          git config http.https://github.com/.extraheader "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          git push -q || echo "push skip"
 
 
   zipdiag:
@@ -177,7 +177,7 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add diag_zip.json
           git commit -q -m "zip diag $(date -u +%s)" || echo "no change"
-          GHURL="https://x-access-token:*** GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-          git push -q "$GHURL" || echo "push still failing"
+          git config http.https://github.com/.extraheader "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          git push -q || echo "push still failing"
           echo "=== diag_zip.json ==="
           cat diag_zip.json
