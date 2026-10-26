@@ -26,5 +26,7 @@
   "timeout_s": 2,
   "max_workers": 128,
   "top_for_L4": 150,
-  "L4_enabled_in_workflow": true
+  "L4_enabled_in_workflow": true,
+  "l4_full_scan": true,
+  "l5_only_l4_confirmed": true
 }
