@@ -150,15 +150,24 @@ def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
         res["ws_ok"] = True
         # VLESS: request the target via the tunnel. edgetunnel worker forwards to a
         # remote host; to measure pure bandwidth we tunnel to speed.cloudflare.com:443.
-        tgt_host = "dl.google.com"
+        tgt_host = "spurl.api.030101.xyz"
         tgt_ip = _resolve_ip(tgt_host)
-        _ws_send_binary(w, _build_vless_connect(tgt_ip, 80))
-        # Send an HTTP GET through the tunnel to pull 1MB (chunk) and measure bandwidth.
-        try:
-            w.sendall((f"GET /chrome/linux/current/chrome-linux64-64.deb HTTP/1.1\r\n"
-                       f"Host: {tgt_host}\r\nRange: bytes=0-1048575\r\nConnection: close\r\n\r\n").encode())
-        except Exception:
-            pass
+        _ws_send_binary(w, _build_vless_connect(tgt_ip, 443))
+        # Read whatever flows through the tunnel for up to 15s (5MB cap), measure bw.
+        got = 0
+        t_dl = time.time()
+        deadline = time.time() + 15
+        while got < 5 * 1024 * 1024 and time.time() < deadline:
+            try:
+                c2 = w.recv(65536)
+            except socket.timeout:
+                break
+            if not c2:
+                break
+            got += len(c2)
+        dt = max(time.time() - t_dl, 0.001)
+        res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
+        res["ws_ok"] = got > 0
         # Read for up to 8s / mb MB. VLESS server may reply with a TLS-encrypted
         # stream; we just count bytes flowing to gauge tunnel bandwidth.
         w.settimeout(8)
