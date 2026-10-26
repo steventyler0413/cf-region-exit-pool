@@ -303,7 +303,7 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
         from collections import defaultdict
         by_reg = defaultdict(list)
         for (ip, port), s in l3:
-            regs = [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
+            regs = [r for r in cfg["targets"] if ip in _port_buckets(cfg, r)]
             for reg in regs:
                 by_reg[reg].append((ip, port, s["avg_ms"], s))
 
@@ -344,8 +344,15 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
             s["tunnel_ok"] = None
 
 
-    def regions_of(ip):
-        return [r for r in cfg["targets"] if ip in buckets.get((r, "443"), []) + buckets.get((r, "8443"), [])]
+    def _port_buckets(cfg, r):
+    """Return the combined IP bucket for region r across cfg['refine_ports']."""
+    ips = set()
+    for p in cfg.get("refine_ports", ["443"]):
+        ips |= buckets.get((r, p), [])
+    return ips
+
+def regions_of(ip):
+        return [r for r in cfg["targets"] if ip in _port_buckets(cfg, r)]
 
     out_data = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
