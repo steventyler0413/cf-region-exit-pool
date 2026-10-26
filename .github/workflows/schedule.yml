@@ -18,6 +18,10 @@ on:
         required: false
         default: false
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   fast:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'fast' }}
@@ -112,7 +116,7 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add l4_diag.json data/refined.json refine.log 2>/dev/null
           git commit -q -m "deep diag $(date -u +%s)" || echo "nothing to commit"
-          git push -q || echo "push skip"
+          git push -q https://x-access-token:*** GITHUB_TOKEN }}@github.com/${{ github.repository }} 2>&1 || echo "push skip"
 
 
   zipdiag:
@@ -172,4 +176,6 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add diag_zip.json
           git commit -q -m "zip diag $(date -u +%s)" || echo "no change"
-          git push -q || echo "push skip (no write token)"
+          git push -q "https://x-access-token:*** GITHUB_TOKEN }}@github.com/${{ github.repository }}" || echo "push still failing"
+          echo "=== diag_zip.json ==="
+          cat diag_zip.json
