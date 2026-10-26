@@ -165,6 +165,104 @@ jobs:
           print(f"VLESS->dl.google.com:80 GET 1MB: got {got} bytes in {dt:.1f}s = {got*8/1e6/dt:.1f} Mbps")
           PY
 
+      - name: VLESS-WS raw tunnel probe
+        if: always() && !cancelled()
+        run: |
+          python3 - <<'PY'
+          import socket, ssl, base64, os, struct, time
+          SNI="edgetunnel-hk.dreamtimecloudshare.com"
+          IP,PORT="207.57.123.112",443
+
+          def ws_handshake(w):
+              key=base64.b64encode(os.urandom(16)).decode()
+              w.sendall(f"GET / HTTP/1.1\r\nHost: {SNI}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+              w.settimeout(6); buf=b""
+              try:
+                  while b"\r\n\r\n" not in buf: buf+=w.recv(1024)
+              except: pass
+              return buf.split(b"\r\n")[0].decode(errors="replace")
+
+          def ws_send_bin(w, payload):
+              m=os.urandom(4); ln=len(payload); f=bytearray([0x82])
+              if ln<126: f.append(0x80|ln)
+              else: f.append(0x80|126); f+=struct.pack(">H",ln)
+              f+=m; f+=bytes(b^m[i%4] for i,b in enumerate(payload)); w.sendall(bytes(f))
+
+          def ws_recv_bin(w):
+              b1=w.recv(1); b2=w.recv(1)
+              if not b1 or not b2: return b""
+              ln=b2[0]&0x7F
+              if ln==126: ln=struct.unpack(">H",w.recv(2))[0]
+              elif ln==127: ln=struct.unpack(">Q",w.recv(8))[0]
+              payload=b""
+              while len(payload)<ln:
+                  c=w.recv(ln-len(payload))
+                  if not c: break
+                  payload+=c
+              return payload
+
+          s=socket.create_connection((IP,PORT),timeout=8)
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          w=ctx.wrap_socket(s,server_hostname=SNI)
+          print("WS upgrade:", ws_handshake(w))
+
+          # Test 1: send raw TLS ClientHello through WS binary, no VLESS frames
+          # This simulates: "what does the tunnel do with arbitrary bytes?"
+          # Build a minimal TLS 1.2 ClientHello
+          tls_hello = bytes([
+              0x16, 0x03, 0x01, 0x00, 0x80,  # handshake, TLS 1.2, length ~0x80
+              0x01, 0x00, 0x00, 0x7C,       # client hello
+              0x03, 0x03,                     # TLS 1.2 + random
+          ]) + os.urandom(32) + bytes([0x00, 0x00,  # session id
+              0x00, 0x02, 0x13, 0x01,        # 1 cipher: TLS_AES_128_GCM_SHA256
+              0x00, 0x01, 0x00,             # compression: null
+              0x00, 0x0A,                   # extensions: server_name
+              0x00, 0x00, 0x00, 0x08, 0x00, 0x06,
+              0x00, 0x01, 0x00, 0x05, 0x03, 0x00, 0x00,
+              0x65, 0x64, 0x67, 0x65, 0x74, 0x65, 0x74, 0x75, 0x6E, 0x6E, 0x65, 0x6C, 0x2D, 0x68, 0x6B,
+              # pad to length
+          ])
+          print(f"TLS ClientHello {len(tls_hello)} bytes, sending through WS binary...")
+          ws_send_bin(w, tls_hello)
+          w.settimeout(6)
+          try:
+              resp = ws_recv_bin(w)
+              print(f"Got {len(resp)} bytes back: {resp[:40].hex()}")
+          except socket.timeout:
+              print("No response to raw TLS hello within 6s")
+
+          # Test 2: VLESS connect frame to a known working target (spurl IP:443)
+          import socket as _sk
+          try:
+              tgt_ip = _sk.gethostbyname("spurl.api.030101.xyz")
+              print(f"spurl IP: {tgt_ip}")
+          except:
+              tgt_ip = None
+              print("spurl DNS failed")
+          if tgt_ip:
+              uuid_hex = "d37f6de7d1b24fe6a321242878dca3b8"
+              vless_frame = bytearray()
+              vless_frame.append(0)  # version
+              vless_frame += bytes.fromhex(uuid_hex)
+              vless_frame.append(1)  # cmd=connect
+              vless_frame.append(1)  # type=ipv4
+              vless_frame += _sk.inet_aton(tgt_ip)
+              vless_frame += struct.pack(">H", 443)
+              print(f"VLESS connect frame to {tgt_ip}:443, {len(vless_frame)} bytes")
+              ws_send_bin(w, bytes(vless_frame))
+              w.settimeout(6)
+              try:
+                  got = 0; t0=time.time()
+                  while time.time()-t0 < 5:
+                      data = ws_recv_bin(w)
+                      if not data: break
+                      got += len(data)
+                  print(f"After VLESS connect: {got} bytes in {time.time()-t0:.1f}s")
+              except socket.timeout:
+                  print("No data after VLESS connect (timeout)")
+          w.close()
+          PY
+
       - name: Commit diag + data
         if: always() && !cancelled()
         run: |
