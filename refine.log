@@ -1,6 +1,4 @@
-refining 3164 (ip,port)
-L1/L2 alive: 3154 (15s)
-L3 egress-valid: 3154
-L4 done in 49s: mbps>0=116/3154
-L5 done: tunnel_ok=116/116 (L4-confirmed only)
-final 3154 -> data/refined.json
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 348
+    """Return the combined IP bucket for region r across cfg['refine_ports']."""
+    ^
+IndentationError: expected an indented block after function definition on line 347
