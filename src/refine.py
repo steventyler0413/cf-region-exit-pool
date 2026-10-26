@@ -109,14 +109,21 @@ def _ws_send_binary(ws, payload):
     f += bytes(b ^ masked[i % 4] for i, b in enumerate(payload))
     ws.sendall(bytes(f))
 
-def _build_vless_connect(target_ip, target_port, cmd=1):
+def _build_vless_header():
+    """VLESS v1 header (17 bytes): version + uuid + cmd(connect)."""
     b = bytearray()
-    b.append(0)
-    b += bytes.fromhex(UUID_HEX)
-    b.append(cmd)          # 1 = connect, 2 = send, 3 = disconnect
-    b.append(1)           # type: ipv4
-    b += socket.inet_aton(target_ip)
+    b.append(0)                      # version
+    b += bytes.fromhex(UUID_HEX)     # 16-byte UUID
+    b.append(0)                      # cmd = 0x00 (connect; in v1 all is connect)
+    return bytes(b)
+
+def _build_vless_packet(target_ip, target_port, payload=b""):
+    """VLESS v1 data packet: addr_type + ipv4 + port + payload."""
+    b = bytearray()
+    b.append(1)                      # addr_type = ipv4
+    b += socket.inet_aton(target_ip) # 4 bytes
     b += struct.pack(">H", target_port)
+    b += payload
     return bytes(b)
 
 def _resolve_ip(host):
@@ -217,14 +224,16 @@ def _ws_send_text_bin(ws, payload):
     ws.sendall(bytes(f))
 
 def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
-    """VLESS-WS tunnel to ip:port -> VLESS connect to the edgetunnel-hk backend
-    (its own IP:443) -> inner TLS to edgetunnel-hk domain -> GET a large body.
-    All candidate IPs forward to the same edgetunnel-hk host; this measures
-    the shared egress bandwidth of that path."""
-    res = {"mbps": 0.0, "ws_ok": False}
-    backend_host = "edgetunnel-hk.dreamtimecloudshare.com"
-    backend_ip = _resolve_ip(backend_host)
-    if not backend_ip or backend_ip == backend_host:
+    """Simulate a full v2ray VLESS-WS client:
+    1) WS upgrade to ip:port (SNI=edgetunnel-hk, path=/)
+    2) VLESS v1 header (17 bytes)
+    3) VLESS data packet -> spurl.api.030101.xyz IP:443 (inner TLS)
+    4) Complete inner TLS handshake, then HTTP GET /5mb
+    5) Measure bytes received = exit bandwidth."""
+    res = {"mbps": 0.0, "ws_ok": False, "vless_ok": False}
+    tgt_host = "spurl.api.030101.xyz"
+    tgt_ip = _resolve_ip(tgt_host)
+    if not tgt_ip or tgt_ip == tgt_host:
         return res
     try:
         s = socket.create_connection((ip, int(port)), timeout=8)
@@ -236,11 +245,44 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             w.close()
             return res
         res["ws_ok"] = True
-        # VLESS connect frame to edgetunnel-hk's own IP:443
-        _ws_send_binary(w, _build_vless_connect(backend_ip, 443))
-        # Inner TLS to the backend domain
+        # Step 2: VLESS v1 header
+        _ws_send_binary(w, _build_vless_header())
+        # Step 3: VLESS data packet to spurl:443 with a TLS ClientHello payload
+        # Build a minimal TLS 1.2 ClientHello
+        import struct as _st
+        ch = bytearray()
+        ch += b"\x16\x03\x01"           # handshake, TLS 1.2
+        ch += b"\x00\x60"                # length (placeholder)
+        ch += b"\x01\x00\x00\x5c"     # client hello
+        ch += b"\x03\x03"               # random (TLS 1.2)
+        ch += os.urandom(32)              # random bytes
+        ch += b"\x00"                    # session id length
+        ch += b"\x00\x04\x00\x13\x00" # cipher suites (TLS_AES_128_GCM_SHA256)
+        ch += b"\x01\x00"               # compression: null
+        ch += b"\x00\x0a\x00\x00\x08\x00\x06\x03\x00\x00\x02\x01\x00" # SNI ext
+        # Adjust the handshake length field
+        total_handshake = len(ch)
+        ch[3:5] = _st.pack(">H", total_handshake - 5)
+        vless_pkt = _build_vless_packet(tgt_ip, 443, bytes(ch))
+        _ws_send_binary(w, vless_pkt)
+        # Step 4: Read TLS ServerHello through the tunnel (WS binary frames)
+        w.settimeout(15)
+        try:
+            srv_resp = _ws_recv_binary(w)
+            print(f"[L4 {ip}:{port}] TLS server response: {len(srv_resp)} bytes")
+            if len(srv_resp) == 0:
+                res["vless_ok"] = False
+                w.close()
+                return res
+            res["vless_ok"] = True
+        except socket.timeout:
+            res["vless_ok"] = False
+            w.close()
+            return res
+        # Step 5: Complete inner TLS handshake + GET /5mb through the tunnel
+        # Build a WsTunnel that proxies WS binary frames as a socket for ssl.wrap_socket
         class _WsTunnel:
-            def __init__(self, ws, timeout=25):
+            def __init__(self, ws, timeout=30):
                 self.ws = ws; self.ws.settimeout(timeout)
             def fileno(self): return -1
             def settimeout(self, v): self.ws.settimeout(v)
@@ -250,17 +292,21 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             def close(self):
                 try: self.ws.close()
                 except: pass
-        wst = _WsTunnel(w, timeout=25)
-        # Try inner TLS handshake
+        wst = _WsTunnel(w, timeout=30)
+        # The TLS handshake is partially done (ClientHello sent, ServerHello received).
+        # Complete it by wrapping a fresh socket-like over the tunnel.
+        # Since we can't easily inject into an in-progress TLS session, do a fresh
+        # inner TLS: send new ClientHello, complete handshake, then GET.
         try:
             ictx = ssl.create_default_context()
             ictx.check_hostname = False
             ictx.verify_mode = ssl.CERT_NONE
-            itls = ictx.wrap_socket(wst, server_hostname=backend_host, do_handshake_on_connect=True)
-            # GET the root path; the edgetunnel-hk host likely serves some HTTP content
-            itls.sendall((f"GET / HTTP/1.1\r\nHost: {backend_host}\r\n"
+            # Re-wrap: the tunnel is now at TLS data phase, so we just send HTTP GET
+            # (TLS was already established by the spurl server after our ClientHello)
+            itls = ictx.wrap_socket(wst, server_hostname=tgt_host, do_handshake_on_connect=False)
+            itls.sendall((f"GET /{mb}mb HTTP/1.1\r\nHost: {tgt_host}\r\n"
                           f"Connection: close\r\n\r\n").encode())
-            itls.settimeout(25)
+            itls.settimeout(30)
             got = 0
             t_dl = time.time()
             while got < mb * 1024 * 1024:
@@ -274,28 +320,12 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             dt = max(time.time() - t_dl, 0.001)
             res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
             res["ws_ok"] = got > 0
+            print(f"[L4 {ip}:{port}] pulled {got} bytes in {dt:.1f}s = {res['mbps']}Mbps")
             itls.close()
-        except ssl.SSLError as ex:
-            # Inner TLS failed - the worker didn't forward a TLS stream to backend.
-            # Fall back: just count raw bytes that flow through the tunnel.
-            got = 0
-            t_dl = time.time()
-            deadline = time.time() + 20
-            while got < mb * 1024 * 1024 and time.time() < deadline:
-                try:
-                    c2 = wst.recv(65536)
-                    if not c2:
-                        break
-                    got += len(c2)
-                except (socket.timeout, OSError):
-                    break
-            dt = max(time.time() - t_dl, 0.001)
-            res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
-            res["ws_ok"] = got > 0
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as ex:
+            print(f"[L4 {ip}:{port}] inner TLS/GET failed: {ex}")
+    except Exception as ex:
+        print(f"[L4 {ip}:{port}] error: {ex}")
     return res
 
 
