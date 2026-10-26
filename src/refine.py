@@ -331,12 +331,12 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
         print(f"L4 done in {l4_done:.0f}s: mbps>0={sum(1 for _,s in l3 if (s.get('mbps') or 0)>0)}/{len(l3)}", flush=True)
 
         # L5: VLESS-WS 101 verification, ONLY on L4-confirmed IPs (mbps>0).
-        l5_confirmed = [s for (_, s) in l3 if (s.get("mbps") or 0) > 0]
+        l5_confirmed = [((ip, port), s) for ((ip, port), s) in l3 if (s.get("mbps") or 0) > 0]
         with ThreadPoolExecutor(max_workers=12) as ex:
-            l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in l5_confirmed}
-            for s in l5_confirmed:
+            l5_futs = {id(s): ex.submit(l5_ws_101, ip, port) for ((ip, port), s) in l5_confirmed}
+            for ((ip, port), s) in l5_confirmed:
                 s["tunnel_ok"] = l5_futs[id(s)].result()
-        print(f"L5 done: tunnel_ok={sum(1 for s in l5_confirmed if s.get('tunnel_ok'))}/{len(l5_confirmed)} (L4-confirmed only)", flush=True)
+        print(f"L5 done: tunnel_ok={sum(1 for _,s in l5_confirmed if s.get('tunnel_ok'))}/{len(l5_confirmed)} (L4-confirmed only)", flush=True)
     else:
         for _, s in l3:
             s["mbps"] = None
