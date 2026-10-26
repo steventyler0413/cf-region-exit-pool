@@ -135,7 +135,12 @@ def l4_vless_speed(ip, port, mb=2, sni=WS_SNI):
         res["ws_ok"] = True
         # VLESS: request the target via the tunnel. edgetunnel worker forwards to a
         # remote host; to measure pure bandwidth we tunnel to speed.cloudflare.com:443.
-        _ws_send_binary(w, _build_vless_connect("speed.cloudflare.com", 443))
+        _ws_send_binary(w, _build_vless_connect("proof.ovh.net", 80))
+        # Send an HTTP GET through the tunnel to actually pull 1MB and measure.
+        try:
+            w.sendall(b"GET /files/1Mb.dat HTTP/1.0\r\nHost: proof.ovh.net\r\n\r\n")
+        except Exception:
+            pass
         # Read for up to 8s / mb MB. VLESS server may reply with a TLS-encrypted
         # stream; we just count bytes flowing to gauge tunnel bandwidth.
         w.settimeout(8)
@@ -190,9 +195,9 @@ def run(config_path="config.json", out="data/refined.json", l4=False):
                 top_tasks.append((ip, port, s, reg))
         tv = time.time()
         with ThreadPoolExecutor(max_workers=12) as ex:
-            sp = {t: ex.submit(l4_vless_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
+            sp = {(t[0], t[1]): ex.submit(l4_vless_speed, t[0], t[1], cfg.get("l4_mb", 2)) for t in top_tasks}
             for (ip, port, s, reg) in top_tasks:
-                r = sp[(ip, port, s, reg)].result() if (ip, port, s, reg) in sp else {"mbps": 0.0, "ws_ok": False}
+                r = sp[(ip, port)].result()
                 s["mbps"] = r["mbps"]
                 s["ws_ok"] = r["ws_ok"]
             # mark non-top tasks
