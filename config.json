@@ -28,5 +28,6 @@
   "top_for_L4": 150,
   "L4_enabled_in_workflow": true,
   "l4_full_scan": true,
-  "l5_only_l4_confirmed": true
+  "l5_only_l4_confirmed": true,
+  "l4_mb": 1
 }
