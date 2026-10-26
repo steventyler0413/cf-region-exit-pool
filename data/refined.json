@@ -1,8 +1,6 @@
 {
   "updated_at": "2026-10-26T04:45:54Z",
   "source": "https://zip.cm.edu.kg/",
-  "vless_uuid": "d37f6de7-d1b2-4fe6-a321-242878dca3b8",
-  "vless_sni": "edgetunnel-hk.dreamtimecloudshare.com",
   "layers": [
     "L1 latency",
     "L2 stability",
