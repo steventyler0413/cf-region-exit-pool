@@ -1,3 +1,14 @@
-  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 346
-    topset = {t[:2] for t in top_tasks}
-IndentationError: unexpected indent
+refining 3164 (ip,port)
+L1/L2 alive: 3154 (15s)
+L3 egress-valid: 3154
+L4 done in 35s: mbps>0=118/3154
+Traceback (most recent call last):
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 382, in <module>
+    run(*args, l4=do_l4)
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 336, in run
+    l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in l5_confirmed}
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 336, in <dictcomp>
+    l5_futs = {id(s): ex.submit(l5_ws_101, s["ip"], s["port"]) for s in l5_confirmed}
+                                           ~^^^^^^
+KeyError: 'ip'
