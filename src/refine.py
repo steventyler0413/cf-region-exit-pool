@@ -11,58 +11,29 @@ WS_SNI="edgetunnel-hk.dreamtimecloudshare.com"
 WS_PATH="/"
 
 def fetch_zip(url, timeout=180):
-    """Fetch the seed ZIP from the source domain.
-    The domain 302-redirects to /ip.zip; must follow the redirect and send
-    full browser headers. Retry up to 3 times."""
-    import http.client, ssl as _ssl, time as _time
+    """Fetch seed ZIP. The domain 302-redirects to /ip.zip; urllib follows it
+    automatically. Full browser headers to avoid 403."""
     hdrs = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Connection": "close",
     }
-    host = urllib.parse.urlparse(url).netloc
-    path = urllib.parse.urlparse(url).path or "/"
-    last_err = None
+    last = None
+    import time as _time
     for attempt in range(3):
         try:
-            ctx = _ssl.create_default_context()
-            conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
-            conn.request("GET", path, headers=hdrs)
-            resp = conn.getresponse()
-            final_url = path
-            # follow 30x redirects manually
-            hops = 0
-            while resp.status in (301, 302, 303, 307, 308) and hops < 5:
-                loc = resp.getheader("Location", "")
-                if not loc:
-                    break
-                if loc.startswith("http"):
-                    p2 = urllib.parse.urlparse(loc)
-                    host = p2.netloc
-                    path = p2.path or "/"
-                    final_url = loc
-                    conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
-                else:
-                    path = loc
-                    final_url = f"https://{host}{loc}"
-                conn.request("GET", path, headers=hdrs)
-                resp = conn.getresponse()
-                hops += 1
-            if resp.status != 200:
-                last_err = f"HTTP {resp.status} at {final_url}"
-                resp.read()
-                continue
-            data = resp.read()
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read()
             if data[:4] == b"PK\x03\x04":
                 return data
-            last_err = f"not a zip (got {len(data)} bytes, magic={data[:4]!r})"
-            continue
+            last = f"not a zip ({len(data)} bytes)"
         except Exception as ex:
-            last_err = str(ex)
+            last = str(ex)
         _time.sleep(1 + attempt)
-    raise RuntimeError(f"fetch_zip failed after 3 tries: {last_err}")
+    raise RuntimeError(f"fetch_zip failed after 3 tries: {last}")
+
 
 def build_buckets(zip_bytes, targets, ports):
     z = zipfile.ZipFile(io.BytesIO(zip_bytes))
