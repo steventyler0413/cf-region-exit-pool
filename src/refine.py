@@ -217,14 +217,17 @@ def _ws_send_text_bin(ws, payload):
     ws.sendall(bytes(f))
 
 def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
-    """Simulate a full v2ray client:
-       VLESS-WS tunnel to ip:port -> VLESS connect to spurl IP:443
-       -> inner TLS handshake (spurl is behind CF) -> GET /5mb -> measure bw."""
+    """Full v2ray-client sim against the user's REAL edgetunnel backend:
+    edgetunnel-hk.dreamtimecloudshare.com.
+    VLESS-WS 101 to ip:port -> VLESS connect to the backend's IP:443 ->
+    inner TLS to the edgetunnel domain -> pull bytes (try /5mb, else /) ->
+    measure end-to-end tunnel bandwidth."""
     res = {"mbps": 0.0, "ws_ok": False}
-    tgt_host = "spurl.api.030101.xyz"
-    tgt_ip = _resolve_ip(tgt_host)
-    if not tgt_ip or tgt_ip == tgt_host:
+    backend_host = "edgetunnel-hk.dreamtimecloudshare.com"
+    backend_ip = _resolve_ip(backend_host)
+    if not backend_ip or backend_ip == backend_host:
         return res
+    paths = ["/5mb", "/download", "/", "/speedtest", "/files/5mb"]
     try:
         s = socket.create_connection((ip, int(port)), timeout=8)
         ctx = ssl.create_default_context()
@@ -235,55 +238,57 @@ def l4_vless_speed(ip, port, mb=5, sni=WS_SNI):
             w.close()
             return res
         res["ws_ok"] = True
-        # VLESS connect frame (raw VLESS bytes, NOT a WS frame yet -- the server
-        # expects VLESS payloads as WS binary frames)
-        _ws_send_binary(w, _build_vless_connect(tgt_ip, 443))
-        # Now run inner TLS over the tunnel: wrap a TunnelSocket around `w`.
-        # VLESS payload bytes travel inside WS binary frames, but for the inner
-        # TLS handshake we must send each TLS record as a WS binary frame and
-        # read server->client WS frames for replies. We implement this by
-        # monkey-patching w's recv/sendall at the TLS layer via TunnelSocket,
-        # where sendall = "wrap in a WS binary frame" and recv = "read next
-        # WS binary frame".
+        # VLESS connect to the backend IP:443
+        _ws_send_binary(w, _build_vless_connect(backend_ip, 443))
+        # Inner TLS to the backend domain
         class _WsTunnel:
             def __init__(self, ws, timeout=20):
-                self.ws = ws
-                self.ws.settimeout(timeout)
+                self.ws = ws; self.ws.settimeout(timeout)
             def fileno(self): return -1
             def settimeout(self, v): self.ws.settimeout(v)
-            def sendall(self, data, *a, **k):
-                _ws_send_text_bin(self.ws, bytes(data))
-            def send(self, data, *a, **k):
-                self.sendall(data); return len(data)
-            def recv(self, n, *a, **k):
-                return _ws_recv_binary(self.ws)
+            def sendall(self, data, *a, **k): _ws_send_text_bin(self.ws, bytes(data))
+            def send(self, data, *a, **k): self.sendall(data); return len(data)
+            def recv(self, n, *a, **k): return _ws_recv_binary(self.ws)
             def close(self):
                 try: self.ws.close()
                 except: pass
         wst = _WsTunnel(w, timeout=20)
-        ictx = ssl.create_default_context()
-        ictx.check_hostname = False
-        ictx.verify_mode = ssl.CERT_NONE
-        itls = ictx.wrap_socket(wst, server_hostname=tgt_host, do_handshake_on_connect=True)
-        # Send HTTP GET /5mb through the inner TLS
-        req = f"GET /{mb}mb HTTP/1.1\r\nHost: {tgt_host}\r\nConnection: close\r\n\r\n"
-        itls.sendall(req.encode())
-        itls.settimeout(20)
-        got = 0
-        t_dl = time.time()
-        while got < mb * 1024 * 1024:
+        got_total = 0
+        for path in paths:
             try:
-                chunk = itls.recv(65536)
-            except (socket.timeout, OSError, ssl.SSLError):
-                break
-            if not chunk:
-                break
-            got += len(chunk)
-        dt = max(time.time() - t_dl, 0.001)
-        res["mbps"] = round(got * 8 / 1e6 / dt, 1) if got else 0.0
-        res["ws_ok"] = got > 0
-        try: itls.close()
-        except: pass
+                ictx = ssl.create_default_context()
+                ictx.check_hostname = False
+                ictx.verify_mode = ssl.CERT_NONE
+                itls = ictx.wrap_socket(wst, server_hostname=backend_host, do_handshake_on_connect=True)
+                req = (f"GET {path} HTTP/1.1\r\nHost: {backend_host}\r\n"
+                       f"Range: bytes=0-5242879\r\nConnection: close\r\n\r\n")
+                itls.sendall(req.encode())
+                itls.settimeout(20)
+                got = 0
+                t_dl = time.time()
+                try:
+                    while got < 5 * 1024 * 1024:
+                        c2 = itls.recv(65536)
+                        if not c2:
+                            break
+                        got += len(c2)
+                except (socket.timeout, OSError, ssl.SSLError):
+                    pass
+                dt = max(time.time() - t_dl, 0.001)
+                if got > got_total:
+                    got_total = got
+                    res["mbps"] = round(got * 8 / 1e6 / dt, 1)
+                if got_total >= 1024 * 1024:
+                    break  # got enough, stop trying other paths
+                itls.close()
+            except Exception:
+                # move to next path; reset the tunnel if it broke
+                try:
+                    wst2 = _WsTunnel(w, timeout=20)
+                except Exception:
+                    break
+                wst = wst2
+        res["ws_ok"] = got_total > 0
     except Exception:
         pass
     return res
