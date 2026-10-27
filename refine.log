@@ -1,6 +1,6 @@
 refining 2358 (ip,port)
-L1/L2 alive: 2309 (15s)
-L3 egress-valid: 2309
+L1/L2 alive: 2324 (15s)
+L3 egress-valid: 2324
 Traceback (most recent call last):
   File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 387, in <module>
     run(*args, l4=do_l4)
