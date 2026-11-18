@@ -1,6 +1,6 @@
 refining 1734 (ip,port)
-L1/L2 alive: 1723 (12s)
-L3 egress-valid: 1723
+L1/L2 alive: 1715 (12s)
+L3 egress-valid: 1715
 Traceback (most recent call last):
   File "/home/runner/work/cf-region-exit-pool/cf-region-exit-pool/src/refine.py", line 387, in <module>
     run(*args, l4=do_l4)
